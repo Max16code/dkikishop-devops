@@ -10,14 +10,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Snyk Scan (inside app/ folder)
-        uses: snyk/actions/node@master
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies and run Snyk scan
+        working-directory: ./app
+        run: |
+          npm ci
+          npx snyk test --severity-threshold=critical --fail-on=upgradable
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --severity-threshold=critical --fail-on=upgradable
-          command: test
-          working-directory: ./app
 
       - name: Build Docker image for Trivy scan
         run: docker build -t devops-showcase:${{ github.sha }} -f app/Dockerfile ./app
@@ -64,4 +68,4 @@ jobs:
             docker stop devops-app || true
             docker rm devops-app || true
             docker run -d --name devops-app --restart always -p 80:3000 ${{ secrets.DOCKER_USERNAME }}/devops-showcase:latest
-            echo " Deployment successful!"
+            echo "Deployment successful!"
