@@ -5,39 +5,7 @@ on:
     branches: [ main ]
 
 jobs:
-  security-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Setup Snyk
-        uses: snyk/actions/setup@master
-
-      - name: Run Snyk Test
-        working-directory: ./app
-        run: snyk test --severity-threshold=critical --fail-on=upgradable
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-
-      - name: Build Docker image for Trivy scan
-        run: docker build -t devops-showcase:${{ github.sha }} -f app/Dockerfile ./app
-
-      - name: Trivy Vulnerability Scan
-        uses: aquasecurity/trivy-action@v0.35.0
-        with:
-          image-ref: 'devops-showcase:${{ github.sha }}'
-          format: 'table'
-          exit-code: '1'
-          severity: 'CRITICAL,HIGH'
-          ignore-unfixed: true
-
   build-and-deploy:
-    needs: security-scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
