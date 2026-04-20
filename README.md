@@ -19,3 +19,5 @@ graph TD
     C -->|Pass| E[Build Docker Image]
     E --> F[Push to Docker Hub]
     F --> G[Deploy to AWS EC2]
+# dkikishop-devops
+End-to-end DevOps Portfolio Project - Docker, GitHub Actions, Terraform, DevSecOps
