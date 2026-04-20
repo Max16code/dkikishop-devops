@@ -1,4 +1,4 @@
-terraform {
+﻿terraform {
   required_version = ">= 1.5.0"
 
   required_providers {
@@ -13,7 +13,9 @@ provider "aws" {
   region = var.region
 }
 
-# VPC Module
+# ------------------------
+# VPC
+# ------------------------
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "6.6.1"
@@ -29,61 +31,42 @@ module "vpc" {
   enable_dns_support      = true
 
   enable_nat_gateway = false
-  single_nat_gateway = false
   create_igw         = true
-}
-
-# S3 Bucket for Terraform Remote State
-resource "aws_s3_bucket" "tf_state" {
-  bucket = var.tf_state_bucket
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
-resource "aws_s3_bucket_versioning" "tf_state" {
-  bucket = aws_s3_bucket.tf_state.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-# DynamoDB for State Locking
-resource "aws_dynamodb_table" "tf_lock" {
-  name         = "devops-tf-lock"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "LockID"
-
-  attribute {
-    name = "LockID"
-    type = "S"
-  }
 
   tags = {
-    Name        = "Terraform State Lock"
-    Environment = "DevOps-Showcase"
+    Project = "devops-showcase"
   }
 }
 
+# ------------------------
 # Security Group
+# ------------------------
 resource "aws_security_group" "ec2_sg" {
   name        = "devops-showcase-sg"
-  description = "Security group for DevOps Showcase EC2"
+  description = "Allow SSH, HTTP, HTTPS"
   vpc_id      = module.vpc.vpc_id
 
+  # 🔐 Restrict SSH (CHANGE THIS IP)
   ingress {
-    description = "SSH from anywhere (restrict in production)"
+    description = "SSH"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["YOUR_PUBLIC_IP/32"]
   }
 
   ingress {
     description = "HTTP"
     from_port   = 80
     to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTPS"
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -96,11 +79,13 @@ resource "aws_security_group" "ec2_sg" {
   }
 
   tags = {
-    Name = "devops-showcase-sg"
+    Project = "devops-showcase"
   }
 }
 
-# Latest Amazon Linux 2023 AMI
+# ------------------------
+# Latest Amazon Linux 2023
+# ------------------------
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -109,14 +94,11 @@ data "aws_ami" "al2023" {
     name   = "name"
     values = ["al2023-ami-2023.*-x86_64"]
   }
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
-  }
 }
 
+# ------------------------
 # EC2 Instance
+# ------------------------
 resource "aws_instance" "app_server" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = var.instance_type
@@ -128,24 +110,60 @@ resource "aws_instance" "app_server" {
   user_data = <<-EOF
     #!/bin/bash
     dnf update -y
+
+    # Install Docker
     dnf install -y docker
     systemctl enable --now docker
     usermod -aG docker ec2-user
 
-    # Docker will be started manually by GitHub Actions after deployment
+    # Install Nginx
+    dnf install -y nginx
+    systemctl enable --now nginx
+
+    # Configure Reverse Proxy
+    cat > /etc/nginx/conf.d/app.conf <<EOT
+    server {
+        listen 80;
+
+        location / {
+            proxy_pass http://localhost:3000;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+        }
+    }
+    EOT
+
+    systemctl restart nginx
   EOF
 
   tags = {
-    Name        = "devops-showcase-ec2"
-    Environment = "DevOps-Showcase"
+    Name    = "devops-showcase-ec2"
+    Project = "devops-showcase"
   }
 }
 
-output "ec2_public_ip" {
-  value       = aws_instance.app_server.public_ip
-  description = "Public IP of the EC2 instance - Add this to GitHub Secrets as EC2_PUBLIC_IP"
+# ------------------------
+# Elastic IP (STATIC IP)
+# ------------------------
+resource "aws_eip" "app_eip" {
+  instance = aws_instance.app_server.id
+
+  tags = {
+    Project = "devops-showcase"
+  }
 }
 
-output "vpc_id" {
-  value = module.vpc.vpc_id
+# ------------------------
+# Outputs
+# ------------------------
+output "ec2_public_ip" {
+  value = aws_eip.app_eip.public_ip
+}
+
+output "app_url" {
+  value = "http://${aws_eip.app_eip.public_ip}"
+}
+
+output "ssh_command" {
+  value = "ssh -i ~/.ssh/${var.key_name}.pem ec2-user@${aws_eip.app_eip.public_ip}"
 }

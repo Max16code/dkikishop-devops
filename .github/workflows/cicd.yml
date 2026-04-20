@@ -2,39 +2,120 @@
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main       # production
+      - develop    # staging
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/devops-showcase
 
 jobs:
-  build-and-deploy:
+  build-test-scan:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
+    steps:
+      # 1. Checkout code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. Install dependencies & run tests
+      - name: Install Dependencies & Run Tests
+        run: |
+          cd app
+          npm install
+          npm test
+
+      # 3. Login to Docker Hub
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Build & Push Docker Image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./app
-          file: ./app/Dockerfile
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/devops-showcase:latest
-            ${{ secrets.DOCKER_USERNAME }}/devops-showcase:${{ github.sha }}
+      # 4. Build Docker Image
+      - name: Build Docker Image
+        run: |
+          docker build -t $IMAGE_NAME:latest -t $IMAGE_NAME:${{ github.sha }} ./app
 
-      - name: Deploy to AWS EC2
+      # 5. Scan Image for Vulnerabilities (DevSecOps)
+      - name: Run Trivy Scan
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:latest
+          format: table
+          exit-code: 1   # FAIL pipeline if vulnerabilities found
+
+      # 6. Push Image (only if scan passes)
+      - name: Push Docker Image
+        run: |
+          docker push $IMAGE_NAME:latest
+          docker push $IMAGE_NAME:${{ github.sha }}
+
+  deploy-staging:
+    needs: build-test-scan
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to Staging EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_EC2_IP }}
+          username: ec2-user
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            docker pull $IMAGE_NAME:latest
+
+            docker stop staging-app || true
+            docker rm staging-app || true
+
+            docker run -d \
+              --name staging-app \
+              --restart always \
+              -p 3001:3000 \
+              $IMAGE_NAME:latest
+
+            echo "🚀 Staging Deployment Successful"
+
+  deploy-production:
+    needs: build-test-scan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to Production EC2 (Zero Downtime)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_PUBLIC_IP }}
           username: ec2-user
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            docker pull ${{ secrets.DOCKER_USERNAME }}/devops-showcase:latest
+            docker pull $IMAGE_NAME:latest
+
+            # Start new container on different port
+            docker run -d \
+              --name new-app \
+              -p 3001:3000 \
+              $IMAGE_NAME:latest
+
+            # Wait for app to boot
+            sleep 10
+
+            # Health check (VERY IMPORTANT)
+            curl -f http://localhost:3001 || exit 1
+
+            # Stop old container
             docker stop devops-app || true
             docker rm devops-app || true
-            docker run -d --name devops-app --restart always -p 80:3000 ${{ secrets.DOCKER_USERNAME }}/devops-showcase:latest
-            echo " Deployment successful!"
+
+            # Switch to new container
+            docker rename new-app devops-app
+
+            # Restart with correct port
+            docker run -d \
+              --name devops-app \
+              --restart always \
+              -p 80:3000 \
+              $IMAGE_NAME:latest
+
+            echo "🔥 Production Deployment Successful"
