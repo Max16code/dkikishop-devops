@@ -1,4 +1,4 @@
-@"
+
 # DevOps Showcase Project
 
 Complete end-to-end DevOps pipeline built to showcase skills to recruiters.
