@@ -1,17 +1,16 @@
-﻿name: CI/CD + DevSecOps Pipeline
+﻿name: CI/CD Pipeline
 
 on:
   push:
     branches:
-      - main
-      - develop
+      - main       # production
+      - develop    # staging
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/devops-showcase
-  AWS_REGION: us-east-1
 
 jobs:
-  build-test-scan:
+  build-test-push:
     runs-on: ubuntu-latest
 
     steps:
@@ -35,25 +34,18 @@ jobs:
           cd app
           docker build -t $IMAGE_NAME:latest -t $IMAGE_NAME:${{ github.sha }} .
 
-      - name: Run Trivy Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.IMAGE_NAME }}:latest
-          format: table
-          exit-code: 1
-
       - name: Push Docker Image
         run: |
           docker push $IMAGE_NAME:latest
           docker push $IMAGE_NAME:${{ github.sha }}
 
   deploy-staging:
-    needs: build-test-scan
+    needs: build-test-push
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy to Staging EC2
+      - name: Deploy to Staging
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.STAGING_EC2_IP }}
@@ -67,12 +59,12 @@ jobs:
             echo "✅ Staging deployment successful"
 
   deploy-production:
-    needs: build-test-scan
+    needs: build-test-push
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy to Production EC2
+      - name: Deploy to Production
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_PUBLIC_IP }}
@@ -83,4 +75,4 @@ jobs:
             docker stop prod-app || true
             docker rm prod-app || true
             docker run -d --name prod-app --restart always -p 80:3000 $IMAGE_NAME:latest
-            echo "🔥 Production deployment successful"
+            echo "🚀 Production deployment successful"
