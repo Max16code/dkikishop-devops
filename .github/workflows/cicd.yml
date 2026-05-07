@@ -8,6 +8,7 @@ on:
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/devops-showcase
+  AWS_REGION: us-east-1
 
 jobs:
   build-test-push:
@@ -43,36 +44,90 @@ jobs:
     needs: build-test-push
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Deploy to Staging
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          host: ${{ secrets.STAGING_EC2_IP }}
-          username: ec2-user
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            docker pull $IMAGE_NAME:latest
-            docker stop staging-app || true
-            docker rm staging-app || true
-            docker run -d --name staging-app --restart always -p 3001:3000 $IMAGE_NAME:latest
-            echo "✅ Staging deployment successful"
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Deploy with Terraform (Staging)
+        working-directory: ./terraform
+        run: |
+          terraform init
+          terraform apply -auto-approve \
+            -var="docker_image=$IMAGE_NAME:latest" \
+            -var="environment=staging"
+
+      - name: Get ALB URL
+        working-directory: ./terraform
+        run: |
+          ALB_URL=$(terraform output -raw alb_dns_name)
+          echo "ALB_URL=$ALB_URL" >> $GITHUB_ENV
+
+      - name: Verify Deployment
+        run: |
+          echo "Waiting for deployment..."
+          sleep 30
+          for i in {1..10}; do
+            if curl -f http://${{ env.ALB_URL }}/health; then
+              echo "✅ Staging deployment successful!"
+              exit 0
+            fi
+            echo "Attempt $i/10 - waiting..."
+            sleep 15
+          done
+          exit 1
 
   deploy-production:
     needs: build-test-push
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Deploy to Production
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          host: ${{ secrets.EC2_PUBLIC_IP }}
-          username: ec2-user
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            docker pull $IMAGE_NAME:latest
-            docker stop prod-app || true
-            docker rm prod-app || true
-            docker run -d --name prod-app --restart always -p 80:3000 $IMAGE_NAME:latest
-            echo "🚀 Production deployment successful"
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Deploy with Terraform (Production)
+        working-directory: ./terraform
+        run: |
+          terraform init
+          terraform apply -auto-approve \
+            -var="docker_image=$IMAGE_NAME:latest" \
+            -var="environment=production"
+
+      - name: Get ALB URL
+        working-directory: ./terraform
+        run: |
+          ALB_URL=$(terraform output -raw alb_dns_name)
+          echo "ALB_URL=$ALB_URL" >> $GITHUB_ENV
+
+      - name: Verify Deployment
+        run: |
+          echo "Waiting for deployment..."
+          sleep 60
+          for i in {1..15}; do
+            if curl -f http://${{ env.ALB_URL }}/health; then
+              echo "✅ Production deployment successful!"
+              exit 0
+            fi
+            echo "Attempt $i/15 - waiting..."
+            sleep 20
+          done
+          exit 1
