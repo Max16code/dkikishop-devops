@@ -1,10 +1,28 @@
-@"
-node_modules/
-.DS_Store
-.env
-*.log
-terraform/.terraform/
+# Terraform
 *.tfstate
-*.tfstate.backup
-terraform/terraform.tfstate*
-"@ | Out-File -FilePath .gitignore -Encoding utf8
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+override.tf
+override.tf.json
+
+# AWS
+.aws/
+
+# Environment
+.env
+.env.local
+
+# Node
+node_modules/
+npm-debug.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
