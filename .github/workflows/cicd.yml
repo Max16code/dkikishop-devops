@@ -3,8 +3,8 @@
 on:
   push:
     branches:
-      - main       # production
-      - develop    # staging
+      - main
+      - develop
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/devops-showcase
@@ -32,10 +32,11 @@ jobs:
 
       - name: Build Docker Image
         run: |
-          docker build -t $IMAGE_NAME:latest -t $IMAGE_NAME:${{ github.sha }} ./app
+          cd app
+          docker build -t $IMAGE_NAME:latest -t $IMAGE_NAME:${{ github.sha }} .
 
       - name: Run Trivy Scan
-        uses: aquasecurity/trivy-action@0.20.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE_NAME }}:latest
           format: table
@@ -46,108 +47,40 @@ jobs:
           docker push $IMAGE_NAME:latest
           docker push $IMAGE_NAME:${{ github.sha }}
 
-  terraform-staging:
-    needs: build-test-scan
-    if: github.ref == 'refs/heads/develop'
-    runs-on: ubuntu-latest
-    environment: staging
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-      
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.6.0
-      
-      - name: Terraform Apply (Staging)
-        working-directory: ./terraform
-        run: |
-          terraform init
-          terraform apply -auto-approve \
-            -var-file="environments/staging.tfvars" \
-            -var="docker_image=$IMAGE_NAME:latest"
-
   deploy-staging:
-    needs: terraform-staging
+    needs: build-test-scan
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
-    
-    steps:
-      - name: Get ALB DNS from Terraform
-        working-directory: ./terraform
-        run: |
-          ALB_DNS=$(terraform output -raw alb_dns_name)
-          echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
-      
-      - name: Verify Deployment
-        run: |
-          echo "Waiting for ALB to be ready..."
-          sleep 30
-          curl -f http://${{ env.ALB_DNS }}/health || exit 1
-          echo "✅ Staging deployment successful at http://${{ env.ALB_DNS }}"
 
-  terraform-production:
-    needs: build-test-scan
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: production
-    
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Deploy to Staging EC2
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-      
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-      
-      - name: Terraform Apply (Production)
-        working-directory: ./terraform
-        run: |
-          terraform init
-          terraform apply -auto-approve \
-            -var-file="environments/production.tfvars" \
-            -var="docker_image=$IMAGE_NAME:latest"
+          host: ${{ secrets.STAGING_EC2_IP }}
+          username: ec2-user
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            docker pull $IMAGE_NAME:latest
+            docker stop staging-app || true
+            docker rm staging-app || true
+            docker run -d --name staging-app --restart always -p 3001:3000 $IMAGE_NAME:latest
+            echo "✅ Staging deployment successful"
 
   deploy-production:
-    needs: terraform-production
+    needs: build-test-scan
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Get ALB DNS
-        working-directory: ./terraform
-        run: |
-          ALB_DNS=$(terraform output -raw alb_dns_name)
-          echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
-      
-      - name: Smoke Test
-        run: |
-          sleep 30
-          for i in {1..10}; do
-            if curl -f http://${{ env.ALB_DNS }}/health; then
-              echo "✅ Production deployment successful"
-              exit 0
-            fi
-            echo "Attempt $i failed, retrying..."
-            sleep 10
-          done
-          exit 1
-      
-      - name: Output Deployment Info
-        run: |
-          echo "🚀 Production Environment Ready"
-          echo "ALB URL: http://${{ env.ALB_DNS }}"
-          echo "CloudWatch Dashboard: https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#dashboards:name=devops-dashboard-production"
+      - name: Deploy to Production EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_PUBLIC_IP }}
+          username: ec2-user
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            docker pull $IMAGE_NAME:latest
+            docker stop prod-app || true
+            docker rm prod-app || true
+            docker run -d --name prod-app --restart always -p 80:3000 $IMAGE_NAME:latest
+            echo "🔥 Production deployment successful"
