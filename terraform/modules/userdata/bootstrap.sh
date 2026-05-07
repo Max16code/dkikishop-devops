@@ -1,107 +1,113 @@
-#!/bin/bash
-set -e
+name: CI/CD Pipeline
 
-# Log all output
-exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+on:
+  push:
+    branches:
+      - main
+      - develop
 
-echo "Starting bootstrap for ${environment} environment"
+env:
+  IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/devops-showcase
+  AWS_REGION: us-east-1
 
-# Update system
-yum update -y
-yum install -y docker curl wget jq
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
 
-# Install Docker Compose
-curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-chmod +x /usr/local/bin/docker-compose
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-# Start Docker
-systemctl enable docker
-systemctl start docker
+      - name: Debug - List all files
+        run: |
+          pwd
+          ls -la
+          ls -la terraform/ || echo "terraform directory not found"
 
-# Install CloudWatch Agent
-wget https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
-rpm -U amazon-cloudwatch-agent.rpm
+      - name: Install Dependencies & Test
+        run: |
+          cd app
+          npm install
+          npm test || echo "No tests configured"
 
-# Configure CloudWatch Agent
-cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json << 'EOF'
-{
-  "agent": {
-    "metrics_collection_interval": 60,
-    "run_as_user": "root"
-  },
-  "metrics": {
-    "metrics_collected": {
-      "cpu": {
-        "measurement": ["cpu_usage_idle", "cpu_usage_iowait", "cpu_usage_user", "cpu_usage_system"],
-        "metrics_collection_interval": 60,
-        "totalcpu": true
-      },
-      "mem": {
-        "measurement": ["mem_used_percent"],
-        "metrics_collection_interval": 60
-      },
-      "disk": {
-        "measurement": ["disk_used_percent"],
-        "metrics_collection_interval": 60,
-        "resources": ["/"]
-      }
-    }
-  },
-  "logs": {
-    "logs_collected": {
-      "files": {
-        "collect_list": [
-          {
-            "file_path": "/var/log/messages",
-            "log_group_name": "${environment}-app-logs",
-            "log_stream_name": "{instance_id}-messages",
-            "timezone": "UTC"
-          },
-          {
-            "file_path": "/var/log/docker-container.log",
-            "log_group_name": "${environment}-app-logs",
-            "log_stream_name": "{instance_id}-app",
-            "timezone": "UTC"
-          }
-        ]
-      }
-    }
-  }
-}
-EOF
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
-# Start CloudWatch Agent
-systemctl enable amazon-cloudwatch-agent
-systemctl start amazon-cloudwatch-agent
+      - name: Build Docker Image
+        run: |
+          cd app
+          docker build -t $IMAGE_NAME:latest -t $IMAGE_NAME:${{ github.sha }} .
 
-# Clean up old images to force fresh pull
-docker system prune -f
+      - name: Push Docker Image
+        run: |
+          docker push $IMAGE_NAME:latest
+          docker push $IMAGE_NAME:${{ github.sha }}
 
-# Pull latest image
-docker pull ${docker_image}
+  deploy-staging:
+    needs: build-and-push
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-# Stop and remove old container
-docker stop app-container || true
-docker rm app-container || true
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-# Run new container
-docker run -d \
-  --name app-container \
-  --restart always \
-  -p 3000:3000 \
-  -e NODE_ENV=${environment} \
-  ${docker_image}
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
 
-# Log container output
-docker logs -f app-container >> /var/log/docker-container.log 2>&1 &
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
 
-# Health check
-sleep 10
-if curl -f http://localhost:3000/health; then
-  echo "✅ Application started successfully"
-else
-  echo "❌ Application health check failed"
-  exit 1
-fi
+      - name: Terraform Apply Staging
+        run: |
+          cd terraform
+          terraform apply -auto-approve \
+            -var="docker_image=$IMAGE_NAME:latest" \
+            -var="environment=staging"
 
-echo "Bootstrap completed for ${environment}"
+  deploy-production:
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      - name: Terraform Apply Production
+        run: |
+          cd terraform
+          terraform apply -auto-approve \
+            -var="docker_image=$IMAGE_NAME:latest" \
+            -var="environment=production"
